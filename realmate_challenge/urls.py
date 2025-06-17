@@ -17,6 +17,10 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path
 
+from realmate_challenge_app.views import WebhookView, ConversationDetailView
+
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('webhook/', WebhookView.as_view(), name='webhook'),
+    path('conversations/<uuid:id>/', ConversationDetailView.as_view(), name='conversations'),
 ]
