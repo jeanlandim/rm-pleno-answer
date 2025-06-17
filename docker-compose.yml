@@ -1,0 +1,62 @@
+version: '3.8'
+
+x-common-env: &common_env
+  env_file:
+    - .env
+  environment:
+    DJANGO_PROJECT_NAME: ${DJANGO_PROJECT_NAME}
+    DJANGO_HOST: ${DJANGO_HOST}
+    DJANGO_PORT: ${DJANGO_PORT}
+    DJANGO_SETTINGS_MODULE: ${DJANGO_SETTINGS_MODULE}
+    POSTGRES_DB: ${POSTGRES_DB}
+    POSTGRES_USER: ${POSTGRES_USER}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    POSTGRES_HOST: ${POSTGRES_HOST}
+    POSTGRES_PORT: ${POSTGRES_PORT}
+    REDIS_PORT: ${REDIS_PORT}
+    CELERY_BROKER_URL: ${CELERY_BROKER_URL}
+    CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND}
+
+services:
+  db:
+    image: postgres:14
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    <<: *common_env
+    ports:
+       - "${POSTGRES_PORT}:${POSTGRES_PORT}"
+    restart: always
+
+  redis:
+    image: redis:6-alpine
+    restart: always
+    ports:
+      - "${REDIS_PORT}:${REDIS_PORT}"
+
+  django:
+    build: .
+    command: gunicorn --bind ${DJANGO_HOST}:${DJANGO_PORT} ${DJANGO_PROJECT_NAME}.wsgi:application
+    volumes:
+      - .:/app
+    ports:
+      - "${DJANGO_PORT}:${DJANGO_PORT}"
+    <<: *common_env
+    depends_on:
+      - db
+      - redis
+    restart: always
+
+  celery_worker:
+    build: .
+    command: celery -A ${DJANGO_PROJECT_NAME} worker -l info
+    volumes:
+      - .:/app
+    <<: *common_env
+    depends_on:
+      - db
+      - redis
+      - django
+    restart: always
+
+volumes:
+  postgres_data:
