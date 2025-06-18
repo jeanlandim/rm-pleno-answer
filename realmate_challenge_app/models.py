@@ -14,8 +14,7 @@ class Conversation(models.Model):
         choices=Status.choices,
         default=Status.OPEN
     )
-    started_at = models.DateTimeField(auto_now_add=True)
-    closed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
 
 
 class Message(models.Model):
@@ -25,13 +24,9 @@ class Message(models.Model):
         OUTBOUND = 'OUTBOUND', 'Outbound'
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    conversation = models.ForeignKey(Conversation, on_delete=models.CASCADE, related_name='messages')
+    conversation_id = models.ForeignKey(Conversation, on_delete=models.CASCADE, related_name='messages')
     type = models.CharField(max_length=8, choices=MessageType.choices)
     content = models.TextField()
     timestamp = models.DateTimeField()
-
-    sender = models.CharField(max_length=255, blank=True, null=True)
-    metadata = models.JSONField(blank=True, null=True)
-
     created_at = models.DateTimeField(auto_now_add=True)
 

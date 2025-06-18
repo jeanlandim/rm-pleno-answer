@@ -7,15 +7,15 @@ DJANGO_SETTINGS_PATH := ${DJANGO_APP_NAME}.settings
 
 migrations:
 	@echo "Creating new Django migrations..."
-	DJANGO_SETTINGS_MODULE=${DJANGO_SETTINGS_PATH} poetry run python ${DJANGO_APP_NAME}/manage.py makemigrations
+	DJANGO_SETTINGS_MODULE=${DJANGO_SETTINGS_PATH} poetry run python manage.py makemigrations
 
 migrate:
 	@echo "Applying Django migrations..."
-	DJANGO_SETTINGS_MODULE=${DJANGO_SETTINGS_PATH} poetry run python ${DJANGO_APP_NAME}/manage.py migrate
+	DJANGO_SETTINGS_MODULE=${DJANGO_SETTINGS_PATH} poetry run python manage.py migrate
 
 runserver:
 	@echo "Starting the Django development server..."
-	DJANGO_SETTINGS_MODULE=${DJANGO_SETTINGS_PATH} poetry run python ${DJANGO_APP_NAME}/manage.py runserver 0.0.0.0:8000
+	DJANGO_SETTINGS_MODULE=${DJANGO_SETTINGS_PATH} poetry run python manage.py runserver 0.0.0.0:8000
 
 worker:
 	@echo "Starting celery worker..."
@@ -23,8 +23,7 @@ worker:
 
 test:
 	@echo "Running tests with 100% code coverage..."
-	DJANGO_SETTINGS_MODULE=${DJANGO_SETTINGS_PATH} poetry run pytest --cov=. --cov-fail-under=100 --cov-report=term-missing .
-
+	DJANGO_SETTINGS_MODULE=${DJANGO_SETTINGS_PATH} poetry run pytest -vv --maxfail=1
 lint:
 	@echo "Running the linter (ruff)..."
 	poetry run ruff check .

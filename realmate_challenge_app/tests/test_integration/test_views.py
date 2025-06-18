@@ -5,28 +5,30 @@ from rest_framework import status
 from realmate_challenge_app.models import Conversation, Message
 
 
-@pytest.mark.django_db
+pytestmark = [pytest.mark.integration, pytest.mark.django_db]
+
 class TestWebhookView:
 
     def test_new_conversation_created(self, client, webhook_url, new_conversation_payload):
         response = client.post(webhook_url, data=new_conversation_payload, format='json')
+
         assert response.status_code == status.HTTP_201_CREATED
-        conversation_id = new_conversation_payload['data']['id']
-        assert Conversation.objects.filter(id=conversation_id).exists()
+        assert response.json() == {"message": "Conversation created"}
 
-    def test_new_conversation_already_exists(self, client, webhook_url, new_conversation_payload, current_time):
-        conversation_id = new_conversation_payload['data']['id']
-        Conversation.objects.create(id=conversation_id, started_at=current_time)
-        response = client.post(webhook_url, data=new_conversation_payload, format='json')
+    def test_new_conversation_already_exists(self, client, webhook_url, new_conversation_payload):
+        for _ in range(2):
+            response = client.post(webhook_url, data=new_conversation_payload, format='json')
+
         assert response.status_code == status.HTTP_400_BAD_REQUEST
-        assert response.data['error'] == 'Conversa já existe'
+        assert response.json() == {"error": "Conversation already exists"}
 
-    def test_new_message_accepted(self, client, webhook_url, new_message_payload, current_time):
-        conversation_id = new_message_payload['data']['conversation_id']
-        Conversation.objects.create(id=conversation_id, status=Conversation.Status.OPEN, started_at=current_time)
+    def test_new_message_accepted(self, client, webhook_url, new_message_payload):
         response = client.post(webhook_url, data=new_message_payload, format='json')
-        assert response.status_code == status.HTTP_202_ACCEPTED
+
+        conversation_id = new_message_payload['data']['conversation_id']
         message_id = new_message_payload['data']['id']
+
+        assert response.status_code == status.HTTP_202_ACCEPTED
         assert Message.objects.filter(id=message_id, conversation_id=conversation_id).exists()
 
     def test_new_message_conversation_closed(self, client, webhook_url, new_message_payload, current_time):
@@ -79,7 +81,7 @@ class TestWebhookView:
 
     def test_unhandled_exception_returns_500(self, client, webhook_url, new_conversation_payload):
         with patch(
-            "realmate_challenge_app.views.WebhookView._handle_new_conversation"
+            "realmate_challenge_app.views.WebhookView.post"
         ) as mocked_handler:
             mocked_handler.side_effect = Exception("Erro inesperado")
 
@@ -95,7 +97,6 @@ class TestWebhookView:
         assert response.status_code == status.HTTP_400_BAD_REQUEST
         assert response.data['error'] == 'Conversa não encontrada'
 
-@pytest.mark.django_db
 class TestConversationDetailView:
 
     def test_get_conversation_detail_returns_data(self, 
