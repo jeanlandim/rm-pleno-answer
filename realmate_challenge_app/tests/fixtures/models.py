@@ -1,4 +1,5 @@
 import pytest
+
 from realmate_challenge_app.models import Conversation, Message
 from faker import Faker
 
