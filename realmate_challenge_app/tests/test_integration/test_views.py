@@ -8,7 +8,7 @@ from realmate_challenge_app.views import (
     INVALID_PAYLOAD_MESSAGE,
     INTERNAL_SERVER_ERROR_MESSAGE,
     ERROR_CONVERSATION_ALREADY_EXISTS,
-    ERROR_CONVERSATION_NOT_FOUND_FOR_MESSAGE,
+    MESSAGE_MESSAGE_WITHOUT_CONVERSATION_PROCESSED,
     ERROR_CONVERSATION_CLOSED,
     ERROR_CONVERSATION_ALREADY_CLOSED,
     ERROR_CONVERSATION_NOT_FOUND,
@@ -17,6 +17,7 @@ from realmate_challenge_app.views import (
     MESSAGE_CONVERSATION_CLOSED,
 )
 
+UNEXPECTED_ERROR_EXCEPTION_MESSAGE = "Unexpected error message."
 pytestmark = [pytest.mark.django_db]
 
 class TestWebhookView:
@@ -93,21 +94,22 @@ class TestWebhookView:
 
     def test_unhandled_exception_returns_500(self, client, webhook_url, new_conversation_payload):
         with patch(
-            "realmate_challenge_app.views.WebhookView.post"
+            "realmate_challenge_app.models.Conversation.objects.get_or_create"
         ) as mocked_handler:
-            mocked_handler.side_effect = Exception("Erro inesperado")
+            mocked_handler.side_effect = Exception(UNEXPECTED_ERROR_EXCEPTION_MESSAGE)
 
             response = client.post(webhook_url, data=new_conversation_payload, format='json')
 
         assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
-        assert response.data['error'].startswith(INTERNAL_SERVER_ERROR_MESSAGE.split(':')[0])
-        assert 'Erro inesperado' in response.data['error']
-
+        assert response.data["error"] == INTERNAL_SERVER_ERROR_MESSAGE.format(UNEXPECTED_ERROR_EXCEPTION_MESSAGE)
 
     def test_new_message_conversation_not_found(self, client, webhook_url, new_message_conversation_not_found_payload):
+        message_id = new_message_conversation_not_found_payload["data"]["id"]
+        conversation_id = new_message_conversation_not_found_payload["data"]["conversation_id"]
         response = client.post(webhook_url, data=new_message_conversation_not_found_payload, format='json')
         assert response.status_code == status.HTTP_202_ACCEPTED
-        assert response.data['error'] == ERROR_CONVERSATION_NOT_FOUND_FOR_MESSAGE.format(new_message_conversation_not_found_payload['data']['conversation_id'])
+        assert response.data["message"] == MESSAGE_MESSAGE_WITHOUT_CONVERSATION_PROCESSED.format(
+                        message_id=message_id, conversation_id=conversation_id)
 
 class TestConversationDetailView:
 
@@ -132,7 +134,7 @@ class TestConversationDetailView:
         assert message_data['id'] == str(new_message.id)
         assert message_data['type'] == new_message.type
         assert message_data['content'] == new_message.content
-        assert message_data['timestamp'] == new_message.timestamp
+        assert message_data['timestamp'] == new_message.timestamp.isoformat().replace('+00:00', 'Z')
 
     def test_get_conversation_detail_not_found(self, client, conversation_url_without_id):
         response = client.get(conversation_url_without_id)
