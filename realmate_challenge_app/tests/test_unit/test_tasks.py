@@ -2,8 +2,12 @@ import uuid
 import pytest
 from unittest.mock import patch
 
-from realmate_challenge_app.models import Conversation, Message
+from realmate_challenge_app.models import Message
 from realmate_challenge_app.tasks import (
+    _get_messages_with_less_than_five_secs,
+    _build_message_summary,
+    _create_new_outbound_message,
+    process_inbound_messages,
     check_and_assign_conversation,
     MSG_MESSAGE_ALREADY_HAS_CONVERSATION,
     MSG_MESSAGE_NO_CONVERSATION_OR_EXPECTED,
@@ -12,6 +16,7 @@ from realmate_challenge_app.tasks import (
     MSG_MESSAGE_NOT_FOUND,
     MSG_ERROR_PROCESSING_MESSAGE_CELERY
 )
+
 
 pytestmark = [pytest.mark.django_db]
 
@@ -98,3 +103,38 @@ class TestCheckAndAssignConversationTask:
             )
         )
         assert Message.objects.filter(id=new_message.id).exists()
+
+
+class TestProcessInboundMessages:
+
+    def test_get_messages_with_less_than_five_secs(self, create_inbound_messages):
+        create_messages, conversation = create_inbound_messages
+        create_messages()
+
+        messages = _get_messages_with_less_than_five_secs(conversation.id)
+        assert len(messages) == 3
+    
+    def test_build_message_summary(self, create_inbound_messages):
+        create_messages, conversation = create_inbound_messages
+        create_messages()
+
+        messages = _get_messages_with_less_than_five_secs(conversation.id)
+
+        ids = _get_messages_with_less_than_five_secs(
+            conversation.id
+        ).values_list("id", flat=True)
+
+        expected = "Mensagens recebidas:\n" + "\n".join(str(_id) for _id in ids)
+
+        assert _build_message_summary(ids) == expected
+    
+    def test_create_new_outbound_message(self, new_conversation):
+        new_outbound_message = _create_new_outbound_message(
+            new_conversation.id,
+            "content"
+        )
+
+        assert new_outbound_message.content == "content"
+    
+    def test_process_inbound_messages(self):
+        pass
