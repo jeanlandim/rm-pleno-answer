@@ -21,6 +21,7 @@ pytest-django = "^4.11.1"
 pyyaml = "5.3"
 pytest-docker = "^3.2.2"
 loguru = "^0.7.3"
+faker = "^37.4.0"
 
 
 [build-system]

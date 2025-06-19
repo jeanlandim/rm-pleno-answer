@@ -23,7 +23,7 @@ worker:
 
 test:
 	@echo "Running tests with 100% code coverage..."
-	DJANGO_SETTINGS_MODULE=${DJANGO_SETTINGS_PATH} poetry run pytest -vv --maxfail=1
+	DJANGO_SETTINGS_MODULE=${DJANGO_SETTINGS_PATH} poetry run pytest -vv 
 lint:
 	@echo "Running the linter (ruff)..."
 	poetry run ruff check .
