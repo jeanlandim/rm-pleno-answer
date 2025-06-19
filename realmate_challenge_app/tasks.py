@@ -17,12 +17,12 @@ MSG_MESSAGE_SUCCESSFULLY_ASSIGNED = "Message {message_id} successfully assigned 
 MSG_MESSAGE_NOT_FOUND = "Message {message_id} not found (might have been deleted by another process)."
 MSG_ERROR_PROCESSING_MESSAGE_CELERY = "Error processing message {message_id}. Error: {exc}"
 
+
 @shared_task
 def check_and_assign_conversation(message_id: str):
     try:
         with transaction.atomic():
             message = Message.objects.select_for_update().get(id=message_id)
-
             if message.conversation_id is not None:
                 logger.info(MSG_MESSAGE_ALREADY_HAS_CONVERSATION.format(message_id=message.id))
                 return
@@ -80,6 +80,7 @@ def _create_new_outbound_message(conversation_id: str, content: str):
         conversation_id=Conversation.objects.get(id=conversation_id),
         content=content,
         processed=True,
+        type=Message.MessageType.OUTBOUND
     )
 
 @shared_task
@@ -87,13 +88,15 @@ def process_inbound_messages():
     for conversation_id in Conversation.objects.values_list("id", flat=True):
         messages_to_group = _get_messages_with_less_than_five_secs(conversation_id)
         single_messages = Message.objects.filter(
-            conversation_id__id=conversation_id
+            conversation_id__id=conversation_id,
+            processed=False,
+            type=Message.MessageType.INBOUND
         )
 
         for messages in [single_messages, messages_to_group]:
             content = _build_message_summary(messages.values_list('id', flat=True))
             _create_new_outbound_message(conversation_id, content)
-            
+
             logger.info(content)
             messages.update(
                 processed=True
