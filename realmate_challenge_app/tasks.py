@@ -7,6 +7,7 @@ from .models import Message, Conversation
 from django.db.models import F, Window
 from django.db.models.functions import Lag
 from datetime import timedelta
+from django.utils import timezone
 
 
 INTERVAL_MINIMAL_EXPECTED = 5
@@ -56,21 +57,40 @@ def check_and_assign_conversation(message_id: str):
         logger.error(MSG_ERROR_PROCESSING_MESSAGE_CELERY.format(message_id=message_id, exc=exc))
 
 
-def _get_messages_with_less_than_five_secs(conversation_id):
-    messages = Message.objects.annotate(
-        previous_timestamp=Window(
-            expression=Lag('timestamp'),
-            order_by=F('timestamp').asc()
-        )
-    ).filter(
-        conversation_id__id=conversation_id,
+def _get_single_and_grouped_messages(conversation_id):
+    all_eligible_messages = Message.objects.filter(
+        conversation_id=conversation_id,
         processed=False,
-        type=Message.MessageType.INBOUND,
-        previous_timestamp__isnull=False,
-        timestamp__lte=F('previous_timestamp') + timedelta(seconds=INTERVAL_MINIMAL_EXPECTED)
-    )
+        type=Message.MessageType.INBOUND
+    ).order_by('timestamp')
 
-    return messages
+    messages_to_process_as_group = []
+    messages_to_process_individually = []
+
+    current_sequence_messages = []
+    
+    for message in all_eligible_messages:
+        if not current_sequence_messages:
+            current_sequence_messages.append(message)
+        else:
+            time_difference = message.timestamp - current_sequence_messages[-1].timestamp
+            if time_difference <= timedelta(seconds=INTERVAL_MINIMAL_EXPECTED):
+                current_sequence_messages.append(message)
+            else:
+                if len(current_sequence_messages) > 1:
+                    messages_to_process_as_group.extend(current_sequence_messages)
+                else:
+                    messages_to_process_individually.append(current_sequence_messages[0])
+                
+                current_sequence_messages = [message]
+    
+    if current_sequence_messages:
+        if len(current_sequence_messages) > 1:
+            messages_to_process_as_group.extend(current_sequence_messages)
+        else:
+            messages_to_process_individually.append(current_sequence_messages[0])
+
+    return messages_to_process_as_group, messages_to_process_individually
 
 def _build_message_summary(ids):
     return "Mensagens recebidas:\n" + "\n".join(str(_id) for _id in ids)
@@ -80,26 +100,25 @@ def _create_new_outbound_message(conversation_id: str, content: str):
         conversation_id=Conversation.objects.get(id=conversation_id),
         content=content,
         processed=True,
-        type=Message.MessageType.OUTBOUND
+        type=Message.MessageType.OUTBOUND,
+        timestamp=timezone.now(),
     )
 
 @shared_task
 def process_inbound_messages():
+    outbound_result = []
     for conversation_id in Conversation.objects.values_list("id", flat=True):
-        messages_to_group = _get_messages_with_less_than_five_secs(conversation_id)
-        single_messages = Message.objects.filter(
-            conversation_id__id=conversation_id,
-            processed=False,
-            type=Message.MessageType.INBOUND
-        )
+        messages_to_group, single_messages = _get_single_and_grouped_messages(conversation_id)
 
         for messages in [single_messages, messages_to_group]:
-            content = _build_message_summary(messages.values_list('id', flat=True))
-            _create_new_outbound_message(conversation_id, content)
+            if messages:
+                messages_ids = [str(message.id) for message in messages]
+                content = _build_message_summary(messages_ids)
+                _create_new_outbound_message(conversation_id, content)
 
-            logger.info(content)
-            messages.update(
-                processed=True
-            )
-        
+                logger.info(content)
+                outbound_result.append(content)
+
+                Message.objects.filter(id__in=messages_ids).update(processed=True)
+    return outbound_result
     

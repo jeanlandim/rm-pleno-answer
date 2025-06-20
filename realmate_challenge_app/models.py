@@ -34,7 +34,7 @@ class Message(models.Model):
     )
     type = models.CharField(max_length=8, choices=MessageType.choices, default=MessageType.INBOUND)
     content = models.TextField()
-    timestamp = models.DateTimeField(auto_now_add=True)
+    timestamp = models.DateTimeField()
     expected_conversation_id = models.UUIDField(null=True, blank=True)
     processed = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)

@@ -69,7 +69,6 @@ def wait_for_django_service(django_settings, docker_services):
         timeout=TIMEOUT, pause=0.1, check=lambda: is_responsive()
     )
 
-
 @pytest.fixture(autouse=True, scope="session")
 def setup_only_for_integration_tests(
     request,

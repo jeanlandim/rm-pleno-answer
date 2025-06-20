@@ -23,8 +23,8 @@ ERROR_CONVERSATION_ALREADY_CLOSED = "Conversation {} is already closed"
 ERROR_CONVERSATION_NOT_FOUND = "Conversation {} not found"
 
 MESSAGE_CONVERSATION_CREATED = "Conversation {} created"
-MESSAGE_MESSAGE_PROCESSED = "Message {message_id} processed with conversation {conversation_id}"
-MESSAGE_MESSAGE_WITHOUT_CONVERSATION_PROCESSED = "Message {message_id} processed without conversation {conversation_id}"
+MESSAGE_PROCESSED = "Message {message_id} processed with conversation {conversation_id} and timestamp {timestamp}"
+MESSAGE_WITHOUT_CONVERSATION_PROCESSED = "Message {message_id} processed without conversation {conversation_id}"
 MESSAGE_CONVERSATION_CLOSED = "Conversation {} closed"
 MESSAGE_UNKNOWN_OPERATION_RESULT = "Unknown operation result"
 
@@ -106,13 +106,13 @@ class WebhookView(APIView):
         
 
         if not conversation:
-            output_message = MESSAGE_MESSAGE_WITHOUT_CONVERSATION_PROCESSED.format(
+            output_message = MESSAGE_WITHOUT_CONVERSATION_PROCESSED.format(
                 message_id=message_id, conversation_id=conversation_id
             )
             expected_conversation_id = conversation_id
         else:
-            output_message = MESSAGE_MESSAGE_PROCESSED.format(
-                message_id=message_id, conversation_id=conversation.id
+            output_message = MESSAGE_PROCESSED.format(
+                message_id=message_id, conversation_id=conversation.id, timestamp=timestamp
             )
             expected_conversation_id = None
 
