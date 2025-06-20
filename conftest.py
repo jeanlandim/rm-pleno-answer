@@ -1,3 +1,3 @@
-# pytest_plugins = [
-#     "realmate_challenge_app.tests.plugins.docker",
-# ]
+pytest_plugins = [
+    "realmate_challenge_app.tests.plugins.docker",
+]

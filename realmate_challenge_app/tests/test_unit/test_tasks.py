@@ -1,159 +1,146 @@
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from unittest.mock import patch, MagicMock, call
 
+from django.test import TestCase
+from django.utils import timezone
+
 from realmate_challenge_app.tasks import (
-    _get_messages_with_less_than_five_secs,
+    check_and_assign_conversation,
+    _get_single_and_grouped_messages,
     _build_message_summary,
     _create_new_outbound_message,
     process_inbound_messages,
-    check_and_assign_conversation,
+    INTERVAL_MINIMAL_EXPECTED,
     MSG_MESSAGE_ALREADY_HAS_CONVERSATION,
     MSG_MESSAGE_NO_CONVERSATION_OR_EXPECTED,
     MSG_CONVERSATION_NOT_FOUND_FOR_MESSAGE_DELETING,
     MSG_MESSAGE_SUCCESSFULLY_ASSIGNED,
     MSG_MESSAGE_NOT_FOUND,
     MSG_ERROR_PROCESSING_MESSAGE_CELERY,
-    INTERVAL_MINIMAL_EXPECTED,
 )
 
 from realmate_challenge_app.models import Message, Conversation
-from django.db.models.functions import Lag as LagOriginal
 
 
-class TestCheckAndAssignConversationTaskUnit:
+class MessageGroupingBaseTest(TestCase):
+    def setUp(self):
+        self.conversation_id = uuid.uuid4()
+        self.now = timezone.now()
 
-    @patch('django.db.transaction.atomic')
+    def _create_mock_message(self, timestamp_offset_seconds=0, content="test", conversation_id=None,
+                              message_id=None, processed=False, type="INBOUND", expected_conversation_id=None):
+        mock_msg = MagicMock(spec=Message)
+        mock_msg.id = message_id if message_id else uuid.uuid4()
+        mock_msg.conversation_id = conversation_id
+        mock_msg.timestamp = self.now + timedelta(seconds=timestamp_offset_seconds)
+        mock_msg.content = content
+        mock_msg.processed = processed
+        mock_msg.type = type
+        mock_msg.expected_conversation_id = expected_conversation_id
+        mock_msg.save = MagicMock()
+        mock_msg.delete = MagicMock()
+        return mock_msg
+
+    def _create_mock_conversation(self, conv_id=None, status="OPEN"):
+        mock_conv = MagicMock(spec=Conversation)
+        mock_conv.id = conv_id if conv_id else uuid.uuid4()
+        mock_conv.status = status
+        return mock_conv
+
+
+class TestCheckAndAssignConversation(MessageGroupingBaseTest):
+
+    @patch('realmate_challenge_app.tasks.transaction.atomic')
     @patch('realmate_challenge_app.tasks.logger')
     @patch('realmate_challenge_app.tasks.Message.objects')
     def test_message_already_has_conversation(self, mock_message_objects, mock_logger, mock_atomic):
-        mock_conversation_id_instance = MagicMock(spec=Conversation, id=uuid.uuid4())
-        mock_message_instance = MagicMock(
-            spec=Message,
-            id=uuid.uuid4(),
-            conversation_id=mock_conversation_id_instance,
-            save=MagicMock(),
-            delete=MagicMock(),
-            expected_conversation_id=None,
-            timestamp=None,
-            processed=False,
-            type=Message.MessageType.INBOUND
-        )
-        mock_message_objects.select_for_update.return_value.get.return_value = mock_message_instance
+        mock_conv_instance = self._create_mock_conversation()
+        mock_msg_instance = self._create_mock_message(conversation_id=mock_conv_instance.id)
 
-        check_and_assign_conversation(str(mock_message_instance.id))
+        mock_message_objects.select_for_update.return_value.get.return_value = mock_msg_instance
+
+        check_and_assign_conversation(str(mock_msg_instance.id))
 
         mock_atomic.assert_called_once()
         mock_logger.info.assert_called_once_with(
-            MSG_MESSAGE_ALREADY_HAS_CONVERSATION.format(message_id=mock_message_instance.id)
+            MSG_MESSAGE_ALREADY_HAS_CONVERSATION.format(message_id=mock_msg_instance.id)
         )
-        mock_message_instance.save.assert_not_called()
-        mock_message_instance.delete.assert_not_called()
+        mock_msg_instance.save.assert_not_called()
+        mock_msg_instance.delete.assert_not_called()
 
-    @patch('django.db.transaction.atomic')
+    @patch('realmate_challenge_app.tasks.transaction.atomic')
     @patch('realmate_challenge_app.tasks.logger')
     @patch('realmate_challenge_app.tasks.Message.objects')
     def test_message_no_expected_conversation_id(self, mock_message_objects, mock_logger, mock_atomic):
-        mock_message_instance = MagicMock(
-            spec=Message,
-            id=uuid.uuid4(),
-            conversation_id=None,
-            expected_conversation_id=None,
-            save=MagicMock(),
-            delete=MagicMock(),
-            timestamp=None,
-            processed=False,
-            type=Message.MessageType.INBOUND
-        )
-        mock_message_objects.select_for_update.return_value.get.return_value = mock_message_instance
+        mock_msg_instance = self._create_mock_message(conversation_id=None, expected_conversation_id=None)
+        mock_message_objects.select_for_update.return_value.get.return_value = mock_msg_instance
 
-        check_and_assign_conversation(str(mock_message_instance.id))
+        check_and_assign_conversation(str(mock_msg_instance.id))
 
         mock_atomic.assert_called_once()
         mock_logger.warning.assert_called_once_with(
-            MSG_MESSAGE_NO_CONVERSATION_OR_EXPECTED.format(message_id=mock_message_instance.id)
+            MSG_MESSAGE_NO_CONVERSATION_OR_EXPECTED.format(message_id=mock_msg_instance.id)
         )
-        mock_message_instance.delete.assert_called_once()
-        mock_message_instance.save.assert_not_called()
+        mock_msg_instance.delete.assert_called_once()
+        mock_msg_instance.save.assert_not_called()
 
-    @patch('django.db.transaction.atomic')
+    @patch('realmate_challenge_app.tasks.transaction.atomic')
     @patch('realmate_challenge_app.tasks.logger')
     @patch('realmate_challenge_app.tasks.Conversation.objects')
     @patch('realmate_challenge_app.tasks.Message.objects')
     def test_conversation_found_and_assigned(self, mock_message_objects, mock_conversation_objects, mock_logger, mock_atomic):
         mock_expected_conv_id = uuid.uuid4()
-        mock_message_instance = MagicMock(
-            spec=Message,
-            id=uuid.uuid4(),
-            conversation_id=None,
-            expected_conversation_id=mock_expected_conv_id,
-            save=MagicMock(),
-            delete=MagicMock(),
-            timestamp=None,
-            processed=False,
-            type=Message.MessageType.INBOUND
-        )
-        mock_conversation_instance = MagicMock(spec=Conversation, id=mock_expected_conv_id)
+        mock_msg_instance = self._create_mock_message(conversation_id=None, expected_conversation_id=mock_expected_conv_id)
+        mock_conv_instance = self._create_mock_conversation(conv_id=mock_expected_conv_id)
 
-        mock_message_objects.select_for_update.return_value.get.return_value = mock_message_instance
-        mock_conversation_objects.get.return_value = mock_conversation_instance
+        mock_message_objects.select_for_update.return_value.get.return_value = mock_msg_instance
+        mock_conversation_objects.get.return_value = mock_conv_instance
 
-        check_and_assign_conversation(str(mock_message_instance.id))
+        check_and_assign_conversation(str(mock_msg_instance.id))
 
         mock_atomic.assert_called_once()
         mock_conversation_objects.get.assert_called_once_with(id=mock_expected_conv_id)
-        mock_message_instance.save.assert_called_once()
-
+        self.assertEqual(mock_msg_instance.conversation_id, mock_conv_instance)
+        mock_msg_instance.save.assert_called_once()
         mock_logger.info.assert_called_once_with(
             MSG_MESSAGE_SUCCESSFULLY_ASSIGNED.format(
-                message_id=mock_message_instance.id,
+                message_id=mock_msg_instance.id,
                 conversation_id=mock_expected_conv_id
             )
         )
-        assert mock_message_instance.conversation_id == mock_conversation_instance
-        mock_message_instance.delete.assert_not_called()
+        mock_msg_instance.delete.assert_not_called()
 
-    @patch('django.db.transaction.atomic')
+    @patch('realmate_challenge_app.tasks.transaction.atomic')
     @patch('realmate_challenge_app.tasks.logger')
     @patch('realmate_challenge_app.tasks.Conversation.objects')
     @patch('realmate_challenge_app.tasks.Message.objects')
     def test_conversation_not_found_message_deleted(self, mock_message_objects, mock_conversation_objects, mock_logger, mock_atomic):
         non_existent_conversation_id = uuid.uuid4()
-        mock_message_instance = MagicMock(
-            spec=Message,
-            id=uuid.uuid4(),
-            conversation_id=None,
-            expected_conversation_id=non_existent_conversation_id,
-            save=MagicMock(),
-            delete=MagicMock(),
-            timestamp=None,
-            processed=False,
-            type=Message.MessageType.INBOUND
-        )
+        mock_msg_instance = self._create_mock_message(conversation_id=None, expected_conversation_id=non_existent_conversation_id)
 
-        mock_message_objects.select_for_update.return_value.get.return_value = mock_message_instance
-        mock_conversation_objects.get.side_effect = Conversation.DoesNotExist("Conversation not found")
+        mock_message_objects.select_for_update.return_value.get.return_value = mock_msg_instance
+        mock_conversation_objects.get.side_effect = Conversation.DoesNotExist
 
-        check_and_assign_conversation(str(mock_message_instance.id))
+        check_and_assign_conversation("")
 
         mock_atomic.assert_called_once()
         mock_conversation_objects.get.assert_called_once_with(id=non_existent_conversation_id)
-        mock_message_instance.delete.assert_called_once()
-        mock_message_instance.save.assert_not_called()
-
+        mock_msg_instance.delete.assert_called_once()
+        mock_msg_instance.save.assert_not_called()
         mock_logger.warning.assert_called_once_with(
             MSG_CONVERSATION_NOT_FOUND_FOR_MESSAGE_DELETING.format(
                 conversation_id=non_existent_conversation_id,
-                message_id=mock_message_instance.id
+                message_id=mock_msg_instance.id
             )
         )
 
-    @patch('django.db.transaction.atomic')
+    @patch('realmate_challenge_app.tasks.transaction.atomic')
     @patch('realmate_challenge_app.tasks.logger')
     @patch('realmate_challenge_app.tasks.Message.objects')
     def test_message_does_not_exist(self, mock_message_objects, mock_logger, mock_atomic):
         non_existent_message_id = uuid.uuid4()
-        mock_message_objects.select_for_update.return_value.get.side_effect = Message.DoesNotExist("Message not found")
+        mock_message_objects.select_for_update.return_value.get.side_effect = Message.DoesNotExist
 
         check_and_assign_conversation(str(non_existent_message_id))
 
@@ -162,7 +149,7 @@ class TestCheckAndAssignConversationTaskUnit:
             MSG_MESSAGE_NOT_FOUND.format(message_id=non_existent_message_id)
         )
 
-    @patch('django.db.transaction.atomic')
+    @patch('realmate_challenge_app.tasks.transaction.atomic')
     @patch('realmate_challenge_app.tasks.logger')
     @patch('realmate_challenge_app.tasks.Message.objects.select_for_update')
     def test_unexpected_exception_handling(self, mock_select_for_update, mock_logger, mock_atomic):
@@ -172,186 +159,242 @@ class TestCheckAndAssignConversationTaskUnit:
         check_and_assign_conversation(str(mock_message_id))
 
         mock_atomic.assert_called_once()
-        mock_select_for_update.assert_called_once()
         mock_logger.error.assert_called_once_with(
-            MSG_ERROR_PROCESSING_MESSAGE_CELERY.format(
-                message_id=str(mock_message_id),
-                exc="Simulated DB Error",
-            )
+            MSG_ERROR_PROCESSING_MESSAGE_CELERY.format(message_id=mock_message_id, exc="Simulated DB Error")
         )
 
 
-class TestHelperFunctionsUnit:
+class TestGetSingleAndGroupedMessages(MessageGroupingBaseTest):
 
-    @patch('realmate_challenge_app.tasks.timedelta')
     @patch('realmate_challenge_app.tasks.Message.objects')
-    @patch('realmate_challenge_app.tasks.Window')
-    @patch('realmate_challenge_app.tasks.F')
-    @patch('realmate_challenge_app.tasks.Lag', spec=LagOriginal)
-    def test_get_messages_with_less_than_five_secs_filters_correctly(
-        self, mock_Lag, mock_F, mock_Window, mock_message_objects, mock_timedelta
-    ):
-        mock_conversation_id = uuid.uuid4()
-        mock_queryset = MagicMock()
-        mock_message_objects.annotate.return_value.filter.return_value = mock_queryset
+    def test_empty_messages(self, mock_message_objects):
+        mock_message_objects.filter.return_value.order_by.return_value = []
+        grouped, individual = _get_single_and_grouped_messages(self.conversation_id)
+        self.assertEqual(len(grouped), 0)
+        self.assertEqual(len(individual), 0)
 
-        mock_f_timestamp_asc = MagicMock()
-        mock_F.return_value.asc.return_value = mock_f_timestamp_asc
-        mock_Window.return_value = MagicMock()
+    @patch('realmate_challenge_app.tasks.Message.objects')
+    def test_single_message_individual(self, mock_message_objects):
+        msg = self._create_mock_message(0)
+        mock_message_objects.filter.return_value.order_by.return_value = [msg]
+        grouped, individual = _get_single_and_grouped_messages(self.conversation_id)
+        self.assertEqual(len(grouped), 0)
+        self.assertEqual(len(individual), 1)
+        self.assertEqual(individual[0].id, msg.id)
 
-        mock_f_timestamp_plus_interval = MagicMock()
-        mock_F.return_value.__add__.return_value = mock_f_timestamp_plus_interval
+    @patch('realmate_challenge_app.tasks.Message.objects')
+    def test_two_messages_grouped(self, mock_message_objects):
+        msg1 = self._create_mock_message(0)
+        msg2 = self._create_mock_message(INTERVAL_MINIMAL_EXPECTED - 1)
+        mock_message_objects.filter.return_value.order_by.return_value = [msg1, msg2]
+        grouped, individual = _get_single_and_grouped_messages(self.conversation_id)
+        self.assertEqual(len(grouped), 2)
+        self.assertEqual(len(individual), 0)
+        self.assertIn(msg1.id, [m.id for m in grouped])
+        self.assertIn(msg2.id, [m.id for m in grouped])
 
-        result = _get_messages_with_less_than_five_secs(str(mock_conversation_id))
+    @patch('realmate_challenge_app.tasks.Message.objects')
+    def test_three_messages_grouped(self, mock_message_objects):
+        msg1 = self._create_mock_message(0)
+        msg2 = self._create_mock_message(2)
+        msg3 = self._create_mock_message(4)
+        mock_message_objects.filter.return_value.order_by.return_value = [msg1, msg2, msg3]
+        grouped, individual = _get_single_and_grouped_messages(self.conversation_id)
+        self.assertEqual(len(grouped), 3)
+        self.assertEqual(len(individual), 0)
+        self.assertIn(msg1.id, [m.id for m in grouped])
+        self.assertIn(msg2.id, [m.id for m in grouped])
+        self.assertIn(msg3.id, [m.id for m in grouped])
 
-        mock_message_objects.annotate.assert_called_once()
-        mock_Lag.assert_called_once_with('timestamp')
-        mock_Window.assert_called_once_with(
-            expression=mock_Lag.return_value,
-            order_by=mock_f_timestamp_asc
-        )
-        mock_F.assert_has_calls([
-            call('timestamp'),
-            call('previous_timestamp')
-        ], any_order=True)
+class TestBuildMessageSummary(TestCase):
+    def test_empty_list(self):
+        result = _build_message_summary([])
+        self.assertEqual(result, "Mensagens recebidas:\n")
 
-        mock_timedelta.assert_called_once_with(seconds=INTERVAL_MINIMAL_EXPECTED)
-        mock_message_objects.annotate.return_value.filter.assert_called_once_with(
-            conversation_id__id=str(mock_conversation_id),
-            processed=False,
-            type=Message.MessageType.INBOUND,
-            previous_timestamp__isnull=False,
-            timestamp__lte=mock_f_timestamp_plus_interval
-        )
-        assert result == mock_queryset
+    def test_single_id(self):
+        mock_id = uuid.uuid4()
+        result = _build_message_summary([str(mock_id)])
+        self.assertEqual(result, f"Mensagens recebidas:\n{mock_id}")
 
-    def test_build_message_summary_formats_correctly(self):
-        ids = [uuid.uuid4(), uuid.uuid4(), uuid.uuid4()]
-        expected_summary = "Mensagens recebidas:\n" + "\n".join(str(_id) for _id in ids)
-        assert _build_message_summary(ids) == expected_summary
+    def test_multiple_ids(self):
+        mock_id1 = uuid.uuid4()
+        mock_id2 = uuid.uuid4()
+        mock_id3 = uuid.uuid4()
+        result = _build_message_summary([str(mock_id1), str(mock_id2), str(mock_id3)])
+        expected = f"Mensagens recebidas:\n{mock_id1}\n{mock_id2}\n{mock_id3}"
+        self.assertEqual(result, expected)
 
+
+class TestCreateNewOutboundMessage(MessageGroupingBaseTest):
+
+    @patch('realmate_challenge_app.tasks.Message.objects')
     @patch('realmate_challenge_app.tasks.Conversation.objects')
-    @patch('realmate_challenge_app.tasks.Message.objects')
-    def test_create_new_outbound_message_creates_and_returns(self, mock_message_objects, mock_conversation_objects):
-        mock_conv_id = uuid.uuid4()
-        mock_content = "Test outbound content"
-
-        mock_conversation_instance = MagicMock(spec=Conversation, id=mock_conv_id)
-        mock_conversation_objects.get.return_value = mock_conversation_instance
-
-        mock_created_message = MagicMock(
-            spec=Message,
-            conversation_id=mock_conversation_instance,
-            content=mock_content,
-            processed=True,
-            id=uuid.uuid4()
+    @patch('realmate_challenge_app.tasks.timezone.now')
+    def test_create_outbound_message_success(self, mock_timezone_now, mock_conversation_objects, mock_message_objects):
+        mock_conv = self._create_mock_conversation(conv_id=self.conversation_id)
+        mock_conversation_objects.get.return_value = mock_conv
+        mock_timezone_now.return_value = self.now
+        
+        mock_created_message = self._create_mock_message(
+            conversation_id=mock_conv.id, content="Summary", processed=True, type="OUTBOUND"
         )
         mock_message_objects.create.return_value = mock_created_message
 
-        result = _create_new_outbound_message(str(mock_conv_id), mock_content)
+        content = "Test summary content"
+        result = _create_new_outbound_message(str(self.conversation_id), content)
 
-        mock_conversation_objects.get.assert_called_once_with(id=str(mock_conv_id))
+        mock_conversation_objects.get.assert_called_once_with(id=str(self.conversation_id))
         mock_message_objects.create.assert_called_once_with(
-            conversation_id=mock_conversation_instance,
-            content=mock_content,
+            conversation_id=mock_conv,
+            content=content,
             processed=True,
-            type=Message.MessageType.OUTBOUND
+            type=Message.MessageType.OUTBOUND,
+            timestamp=self.now,
         )
-        assert result == mock_created_message
-        assert result.content == mock_content
-        assert result.processed is True
+        self.assertEqual(result, mock_created_message)
+
+    @patch('realmate_challenge_app.tasks.Message.objects')
+    @patch('realmate_challenge_app.tasks.Conversation.objects')
+    @patch('realmate_challenge_app.tasks.timezone.now')
+    def test_create_outbound_message_conversation_not_found(self, mock_timezone_now, mock_conversation_objects, mock_message_objects):
+        mock_conversation_objects.get.side_effect = Conversation.DoesNotExist
+
+        content = "Test summary content"
+        
+        with self.assertRaises(Conversation.DoesNotExist):
+            _create_new_outbound_message(str(self.conversation_id), content)
+
+        mock_conversation_objects.get.assert_called_once_with(id=str(self.conversation_id))
+        mock_message_objects.create.assert_not_called()
 
 
-class TestProcessInboundMessagesUnit:
+class TestProcessInboundMessages(MessageGroupingBaseTest):
 
     @patch('realmate_challenge_app.tasks.logger')
     @patch('realmate_challenge_app.tasks._create_new_outbound_message')
     @patch('realmate_challenge_app.tasks._build_message_summary')
-    @patch('realmate_challenge_app.tasks._get_messages_with_less_than_five_secs')
+    @patch('realmate_challenge_app.tasks._get_single_and_grouped_messages')
     @patch('realmate_challenge_app.tasks.Message.objects')
     @patch('realmate_challenge_app.tasks.Conversation.objects')
-    def test_process_inbound_messages_calls_helpers_correctly(
-        self,
-        mock_conversation_objects,
-        mock_message_objects,
-        mock_get_messages_less_than_five_secs,
-        mock_build_message_summary,
-        mock_create_new_outbound_message,
-        mock_logger
-    ):
-        mock_conversation_ids = ["conv_id_1", "conv_id_2"]
-        mock_conversation_objects.values_list.return_value = mock_conversation_ids
+    def test_no_conversations(self, mock_conversation_objects, mock_message_objects,
+                               mock_get_messages, mock_build_summary, mock_create_outbound, mock_logger):
+        mock_conversation_objects.values_list.return_value = []
+        result = process_inbound_messages()
+        self.assertEqual(result, [])
+        mock_get_messages.assert_not_called()
+        mock_build_summary.assert_not_called()
+        mock_create_outbound.assert_not_called()
+        mock_message_objects.filter.assert_not_called()
 
-        mock_grouped_qs_1 = MagicMock()
-        mock_grouped_qs_1.values_list.return_value = [uuid.uuid4(), uuid.uuid4()]
-        mock_grouped_qs_1.update.return_value = 2
+    @patch('realmate_challenge_app.tasks.logger')
+    @patch('realmate_challenge_app.tasks._create_new_outbound_message')
+    @patch('realmate_challenge_app.tasks._build_message_summary')
+    @patch('realmate_challenge_app.tasks._get_single_and_grouped_messages')
+    @patch('realmate_challenge_app.tasks.Message.objects')
+    @patch('realmate_challenge_app.tasks.Conversation.objects')
+    def test_only_single_messages_processed(self, mock_conversation_objects, mock_message_objects,
+                                            mock_get_messages, mock_build_summary, mock_create_outbound, mock_logger):
+        conv_id = self.conversation_id
+        mock_conversation_objects.values_list.return_value = [conv_id]
 
-        mock_grouped_qs_2 = MagicMock()
-        mock_grouped_qs_2.values_list.return_value = []
-        mock_grouped_qs_2.update.return_value = 0
+        msg1 = self._create_mock_message(0, message_id=uuid.uuid4())
+        msg2 = self._create_mock_message(INTERVAL_MINIMAL_EXPECTED + 10, message_id=uuid.uuid4())
+        
+        mock_get_messages.return_value = ([], [msg1, msg2])
 
-        mock_get_messages_less_than_five_secs.side_effect = [
-            mock_grouped_qs_1,
-            mock_grouped_qs_2
-        ]
+        mock_build_summary.return_value = "Summary for individual messages"
+        mock_create_outbound.return_value = self._create_mock_message(type="OUTBOUND", processed=True)
+        
+        mock_message_objects.filter.return_value.update.return_value = 2
 
-        mock_single_qs_1 = MagicMock()
-        mock_single_qs_1.values_list.return_value = [uuid.uuid4()]
-        mock_single_qs_1.update.return_value = 1
-
-        mock_single_qs_2 = MagicMock()
-        mock_single_qs_2.values_list.return_value = [uuid.uuid4(), uuid.uuid4(), uuid.uuid4()]
-        mock_single_qs_2.update.return_value = 3
-
-        mock_message_objects.filter.side_effect = [
-            mock_single_qs_1,
-            mock_single_qs_2
-        ]
-
-        mock_build_message_summary.side_effect = [
-            "Summary for Grouped 1",
-            "Summary for Single 1",
-            "Summary for Grouped 2 (empty)",
-            "Summary for Single 2"
-        ]
-
-        mock_create_new_outbound_message.return_value = MagicMock()
-
-        process_inbound_messages()
+        result = process_inbound_messages()
 
         mock_conversation_objects.values_list.assert_called_once_with("id", flat=True)
+        mock_get_messages.assert_called_once_with(conv_id)
+        
+        mock_build_summary.assert_called_once_with([str(msg1.id), str(msg2.id)])
+        mock_create_outbound.assert_called_once_with(conv_id, "Summary for individual messages")
+        mock_logger.info.assert_called_once_with("Summary for individual messages")
+        mock_message_objects.filter.assert_called_once_with(id__in=[str(msg1.id), str(msg2.id)])
+        mock_message_objects.filter.return_value.update.assert_called_once_with(processed=True)
+        self.assertEqual(result, ["Summary for individual messages"])
 
-        mock_get_messages_less_than_five_secs.assert_has_calls([
-            call("conv_id_1"),
-            call("conv_id_2")
-        ])
-        mock_message_objects.filter.assert_has_calls([
-            call(conversation_id__id="conv_id_1", processed=False, type=Message.MessageType.INBOUND),
-            call(conversation_id__id="conv_id_2", processed=False, type=Message.MessageType.INBOUND)
-        ])
+    @patch('realmate_challenge_app.tasks.logger')
+    @patch('realmate_challenge_app.tasks._create_new_outbound_message')
+    @patch('realmate_challenge_app.tasks._build_message_summary')
+    @patch('realmate_challenge_app.tasks._get_single_and_grouped_messages')
+    @patch('realmate_challenge_app.tasks.Message.objects')
+    @patch('realmate_challenge_app.tasks.Conversation.objects')
+    def test_only_grouped_messages_processed(self, mock_conversation_objects, mock_message_objects,
+                                             mock_get_messages, mock_build_summary, mock_create_outbound, mock_logger):
+        conv_id = self.conversation_id
+        mock_conversation_objects.values_list.return_value = [conv_id]
 
-        mock_build_message_summary.assert_has_calls([
-            call(mock_single_qs_1.values_list.return_value),
-            call(mock_grouped_qs_1.values_list.return_value),
-            call(mock_single_qs_2.values_list.return_value),
-            call(mock_grouped_qs_2.values_list.return_value)
-        ], any_order=False)
+        msg1 = self._create_mock_message(0, message_id=uuid.uuid4())
+        msg2 = self._create_mock_message(INTERVAL_MINIMAL_EXPECTED - 1, message_id=uuid.uuid4())
+        
+        mock_get_messages.return_value = ([msg1, msg2], [])
 
-        mock_create_new_outbound_message.assert_has_calls([
-            call("conv_id_1", "Summary for Single 1"),
-            call("conv_id_1", "Summary for Grouped 1"),
-            call("conv_id_2", "Summary for Single 2"),
-            call("conv_id_2", "Summary for Grouped 2 (empty)"),
-        ], any_order=True)
+        mock_build_summary.return_value = "Summary for grouped messages"
+        mock_create_outbound.return_value = self._create_mock_message(type="OUTBOUND", processed=True)
+        mock_message_objects.filter.return_value.update.return_value = 2
 
-        mock_logger.info.assert_has_calls([
-            call("Summary for Single 1"),
-            call("Summary for Grouped 1"),
-            call("Summary for Single 2"),
-            call("Summary for Grouped 2 (empty)"),
-        ], any_order=True)
+        result = process_inbound_messages()
 
-        mock_grouped_qs_1.update.assert_called_once_with(processed=True)
-        mock_single_qs_1.update.assert_called_once_with(processed=True)
-        mock_grouped_qs_2.update.assert_called_once_with(processed=True)
-        mock_single_qs_2.update.assert_called_once_with(processed=True)
+        mock_get_messages.assert_called_once_with(conv_id)
+        mock_build_summary.assert_called_once_with([str(msg1.id), str(msg2.id)])
+        mock_create_outbound.assert_called_once_with(conv_id, "Summary for grouped messages")
+        mock_logger.info.assert_called_once_with("Summary for grouped messages")
+        mock_message_objects.filter.assert_called_once_with(id__in=[str(msg1.id), str(msg2.id)])
+        mock_message_objects.filter.return_value.update.assert_called_once_with(processed=True)
+        self.assertEqual(result, ["Summary for grouped messages"])
+
+    @patch('realmate_challenge_app.tasks.logger')
+    @patch('realmate_challenge_app.tasks._create_new_outbound_message')
+    @patch('realmate_challenge_app.tasks._build_message_summary')
+    @patch('realmate_challenge_app.tasks._get_single_and_grouped_messages')
+    @patch('realmate_challenge_app.tasks.Message.objects')
+    @patch('realmate_challenge_app.tasks.Conversation.objects')
+    def test_both_single_and_grouped_messages_processed(self, mock_conversation_objects, mock_message_objects,
+                                                        mock_get_messages, mock_build_summary, mock_create_outbound, mock_logger):
+        conv_id = self.conversation_id
+        mock_conversation_objects.values_list.return_value = [conv_id]
+
+        msg_ind = self._create_mock_message(0, message_id=uuid.uuid4())
+        msg_g1 = self._create_mock_message(INTERVAL_MINIMAL_EXPECTED + 10, message_id=uuid.uuid4())
+        msg_g2 = self._create_mock_message(INTERVAL_MINIMAL_EXPECTED + 12, message_id=uuid.uuid4())
+        
+        mock_get_messages.return_value = ([msg_g1, msg_g2], [msg_ind])
+
+        mock_build_summary.side_effect = [
+            "Summary for individual",
+            "Summary for grouped"
+        ]
+        mock_create_outbound.side_effect = [
+            self._create_mock_message(type="OUTBOUND", processed=True, content="Summary for individual"),
+            self._create_mock_message(type="OUTBOUND", processed=True, content="Summary for grouped")
+        ]
+        mock_message_objects.filter.return_value.update.side_effect = [1, 2]
+
+        result = process_inbound_messages()
+
+        mock_get_messages.assert_called_once_with(conv_id)
+
+        mock_build_summary.assert_any_call([str(msg_ind.id)])
+        mock_create_outbound.assert_any_call(conv_id, "Summary for individual")
+        mock_logger.info.assert_any_call("Summary for individual")
+        mock_message_objects.filter.assert_any_call(id__in=[str(msg_ind.id)])
+        mock_message_objects.filter.return_value.update.assert_any_call(processed=True)
+
+        mock_build_summary.assert_any_call([str(msg_g1.id), str(msg_g2.id)])
+        mock_create_outbound.assert_any_call(conv_id, "Summary for grouped")
+        mock_logger.info.assert_any_call("Summary for grouped")
+        mock_message_objects.filter.assert_any_call(id__in=[str(msg_g1.id), str(msg_g2.id)])
+        
+        self.assertEqual(mock_build_summary.call_count, 2)
+        self.assertEqual(mock_create_outbound.call_count, 2)
+        self.assertEqual(mock_logger.info.call_count, 2)
+        self.assertEqual(mock_message_objects.filter.call_count, 2)
+        self.assertEqual(mock_message_objects.filter.return_value.update.call_count, 2)
+
+        self.assertEqual(result, ["Summary for individual", "Summary for grouped"])

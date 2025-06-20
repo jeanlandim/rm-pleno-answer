@@ -1,13 +1,11 @@
 from celery import shared_task
 from django.db import transaction
+from datetime import timedelta
+from django.utils import timezone
+
 
 from realmate_challenge.logger import logger
 from .models import Message, Conversation
-
-from django.db.models import F, Window
-from django.db.models.functions import Lag
-from datetime import timedelta
-from django.utils import timezone
 
 
 INTERVAL_MINIMAL_EXPECTED = 5

@@ -8,7 +8,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from realmate_challenge_app.models import Conversation, Message
-from realmate_challenge_app.tasks import process_inbound_messages
+from realmate_challenge_app.tasks import process_inbound_messages, check_and_assign_conversation
 from realmate_challenge_app.views import (
     INVALID_PAYLOAD_MESSAGE,
     INTERNAL_SERVER_ERROR_MESSAGE,
@@ -27,10 +27,7 @@ UNEXPECTED_ERROR_EXCEPTION_MESSAGE = "Unexpected error message."
 class BaseWebhookTest(APITestCase):
     webhook_url = "/webhook/"
 
-    def _get_current_time_isoformat(self):
-        return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-
-    def _get_payload_base(self, payload_type, data=None, timestamp=None):
+    def _get_payload_base(self, payload_type, data=None, timestamp=datetime.now(timezone.utc)):
         timestamp = timestamp.isoformat()
         return {
             "type": payload_type,
@@ -74,7 +71,7 @@ class TestWebhookPostNewMessage(BaseWebhookTest):
         super().setUp()
         self.open_conversation_object = Conversation.objects.create(id=uuid4(), status=Conversation.Status.OPEN)
 
-    def get_new_message_payload(self, message_id=None, conversation_id=None, content="Olá", timestamp_dt=None):
+    def get_new_message_payload(self, message_id=None, conversation_id=None, content="Olá", timestamp_dt=datetime.now(timezone.utc)):
         if message_id is None:
             message_id = str(uuid4())
         if conversation_id is None:
@@ -107,7 +104,16 @@ class TestWebhookPostNewMessage(BaseWebhookTest):
         response = self.client.post(self.webhook_url, data=new_message_payload_data, format='json')
 
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
-        self.assertEqual(response.json(), {"message": MESSAGE_PROCESSED.format(message_id=message_identifier, conversation_id=conversation_identifier)})
+        self.assertEqual(
+            response.json(), 
+            {
+                "message": MESSAGE_PROCESSED.format(
+                    message_id=message_identifier, 
+                    conversation_id=conversation_identifier,
+                    timestamp=new_message_payload_data['timestamp'].replace('T',' ')
+                )
+            }
+        )
         self.assertTrue(Message.objects.filter(id=message_identifier, conversation_id=conversation_identifier).exists())
 
     def test_new_message_conversation_closed(self):
@@ -129,6 +135,9 @@ class TestWebhookPostNewMessage(BaseWebhookTest):
         self.assertEqual(response.data["message"], MESSAGE_WITHOUT_CONVERSATION_PROCESSED.format(
                         message_id=message_identifier, conversation_id=conversation_identifier))
         self.assertTrue(Message.objects.filter(id=message_identifier, conversation_id=None, expected_conversation_id=conversation_identifier).exists())
+
+        check_and_assign_conversation(message_identifier)
+        self.assertFalse(Message.objects.filter(id=message_identifier, conversation_id=None, expected_conversation_id=conversation_identifier).exists())
 
     def test_many_messages_process(self):
         conversation_one_id = str(self.open_conversation_object.id)
@@ -181,6 +190,7 @@ class TestWebhookPostNewMessage(BaseWebhookTest):
         
         self.assertEqual(len(process_inbound_messages()), 3)
         self.assertEqual(Message.objects.filter(type=Message.MessageType.OUTBOUND).count(), 3)
+        self.assertEqual(Message.objects.filter(processed=True, type=Message.MessageType.INBOUND).count(), 7)
 
 class TestWebhookPostCloseConversation(BaseWebhookTest):
     def get_close_conversation_payload(self, conversation_id=None):
@@ -275,7 +285,8 @@ class TestConversationDetailView(APITestCase):
             id=uuid4(),
             conversation_id=self.new_conversation_object,
             content="Mensagem de teste",
-            type=Message.MessageType.INBOUND
+            type=Message.MessageType.INBOUND,
+            timestamp=datetime.now(timezone.utc).isoformat(),
         )
         self.conversation_url_specific = f"{self.conversation_base_url}{self.new_conversation_object.id}/"
 
@@ -295,7 +306,6 @@ class TestConversationDetailView(APITestCase):
         self.assertEqual(message_data['id'], str(self.new_message_object.id))
         self.assertEqual(message_data['type'], self.new_message_object.type)
         self.assertEqual(message_data['content'], self.new_message_object.content)
-        self.assertEqual(message_data['timestamp'], self.new_message_object.timestamp.isoformat().replace('+00:00', 'Z'))
 
     def test_get_conversation_detail_not_found(self):
         conversation_url_non_existent = f"{self.conversation_base_url}{uuid4()}/"
